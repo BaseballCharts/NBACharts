@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NBA Stats Explorer</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background: linear-gradient(to bottom right, #f8fafc, #dbeafe);
+            min-height: 100vh;
+            padding: 1rem;
+        }
+        #root { max-width: 1400px; margin: 0 auto; }
+
+        .chart-container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            padding: 1.5rem;
+        }
+        .header-section {
+            margin-bottom: 1.5rem;
+        }
+        .filters-row {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            align-items: end;
+            margin-bottom: 1rem;
+        }
+        h1 {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #1f2937;
+            margin-bottom: 0.5rem;
+        }
+        .subtitle {
+            font-size: 0.875rem;
+            color: #6b7280;
+        }
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+        label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: #4b5563;
+            text-transform: uppercase;
+            letter-spacing: 0.025em;
+        }
+        select {
+            padding: 0.5rem;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            background: white;
+            cursor: pointer;
+            min-width: 140px;
+        }
+        select:focus { outline: none; border-color: #3b82f6; }
+        .comparison-filter {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .comparison-filter select {
+            min-width: 60px;
+        }
+        .comparison-filter input {
+            padding: 0.5rem;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            width: 80px;
+        }
+        button {
+            padding: 0.5rem 1rem;
+            background: #ef4444;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover { background: #dc2626; }
+        .chart-wrapper {
+            position: relative;
+            width: 100%;
+            overflow-x: auto;
+        }
+        svg { display: block; }
+        .tooltip {
+            position: fixed;
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            padding: 0.75rem;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            pointer-events: none;
+            z-index: 1000;
+            max-width: 250px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+        .tooltip div {
+            margin: 0.25rem 0;
+        }
+        .tooltip-player {
+            font-weight: bold;
+            font-size: 1rem;
+            margin-bottom: 0.5rem;
+        }
+        .source {
+            position: absolute;
+            font-size: 11px;
+            color: #6b7280;
+            bottom: 10px;
+            left: 60px;
+        }
+        .loading {
+            text-align: center;
+            padding: 3rem;
+            color: #6b7280;
+            font-size: 1.125rem;
+        }
+        .error {
+            text-align: center;
+            padding: 3rem;
+            color: #ef4444;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+
+        function StatsChart() {
+            const [allPlayers, setAllPlayers] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [error, setError] = useState(null);
+            const [hoveredPlayer, setHoveredPlayer] = useState(null);
+            const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+            const [selectedTeam, setSelectedTeam] = useState('All Teams');
+            const [selectedPosition, setSelectedPosition] = useState('All Positions');
+            const [selectedSeason, setSelectedSeason] = useState('All Seasons');
+            const [xStat, setXStat] = useState('PTS');
+            const [yStat, setYStat] = useState('AST');
+            const [gamesOperator, setGamesOperator] = useState('>=');
+            const [gamesValue, setGamesValue] = useState('');
+            const [mpgOperator, setMpgOperator] = useState('>=');
+            const [mpgValue, setMpgValue] = useState('');
+
+            const formatStatValue = (stat, value, forAxis = false) => {
+                if (typeof value !== 'number') return value;
+                if (['FG%', '3P%', 'FT%', 'eFG%', 'TS%'].includes(stat)) {
+                    return value.toFixed(3);
+                }
+                if (['G', 'GS', 'MP'].includes(stat)) {
+                    return Math.round(value);
+                }
+                return value.toFixed(1);
+            };
+
+            const parsePositions = (posStr) => {
+                if (!posStr || typeof posStr !== 'string') return [];
+                return posStr.split('-').map(pos => pos.trim()).filter(pos => pos.length > 0);
+            };
+
+            const parseTeams = (teamStr) => {
+                if (!teamStr || typeof teamStr !== 'string') return [];
+                return teamStr.split('/').map(t => t.trim());
+            };
+
+            useEffect(() => {
+                const sheetId = '1Ffs8hiKfEz9ippfr-yxkN62_i8tflHKaOElIAE26SGc';
+                const gid = '0';
+                const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${gid}`;
+
+                Papa.parse(csvUrl, {
+                    download: true,
+                    header: true,
+                    dynamicTyping: true,
+                    skipEmptyLines: true,
+                    complete: (results) => {
+                        console.log('Loaded players:', results.data.length);
+                        setAllPlayers(results.data);
+                        setLoading(false);
+                    },
+                    error: (err) => {
+                        console.error('Error loading data:', err);
+                        setError('Failed to load data');
+                        setLoading(false);
+                    }
+                });
+            }, []);
+
+            const statOptions = useMemo(() => {
+                if (allPlayers.length === 0) return [];
+                const firstPlayer = allPlayers[0];
+                
+                const categories = {
+                    'Per Game': ['PTS', 'TRB', 'AST', 'STL', 'BLK', 'TOV', 'PF'],
+                    'Shooting': ['FG%', '3P%', 'FT%', 'eFG%', 'TS%'],
+                    'Advanced': ['PER', 'WS', 'BPM', 'VORP'],
+                    'Totals': ['G', 'GS', 'MP']
+                };
+                
+                const grouped = [];
+                Object.entries(categories).forEach(([category, stats]) => {
+                    const availableStats = stats.filter(stat => typeof firstPlayer[stat] === 'number');
+                    if (availableStats.length > 0) {
+                        grouped.push({ category, stats: availableStats });
+                    }
+                });
+                
+                return grouped;
+            }, [allPlayers]);
+
+            const teams = useMemo(() => {
+                const teamSet = new Set();
+                allPlayers.forEach(p => {
+                    const playerTeams = parseTeams(p.Tm);
+                    playerTeams.forEach(t => teamSet.add(t));
+                });
+                return ['All Teams', ...Array.from(teamSet).sort()];
+            }, [allPlayers]);
+
+            const positions = useMemo(() => {
+                const posSet = new Set();
+                allPlayers.forEach(p => {
+                    const playerPositions = parsePositions(p.Pos);
+                    playerPositions.forEach(pos => posSet.add(pos));
+                });
+                const positionOrder = ['PG', 'SG', 'SF', 'PF', 'C'];
+                const sortedPositions = Array.from(posSet).sort((a, b) => {
+                    const indexA = positionOrder.indexOf(a);
+                    const indexB = positionOrder.indexOf(b);
+                    if (indexA === -1 && indexB === -1) return a.localeCompare(b);
+                    if (indexA === -1) return 1;
+                    if (indexB === -1) return -1;
+                    return indexA - indexB;
+                });
+                return ['All Positions', ...sortedPositions];
+            }, [allPlayers]);
+
+            const seasons = useMemo(() => {
+                const seasonSet = new Set();
+                allPlayers.forEach(p => {
+                    if (p.Season) seasonSet.add(p.Season);
+                });
+                return ['All Seasons', ...Array.from(seasonSet).sort().reverse()];
+            }, [allPlayers]);
+
+            const filteredPlayers = useMemo(() => {
+                return allPlayers.filter(player => {
+                    if (gamesValue !== '') {
+                        const games = player.G || 0;
+                        const threshold = Number(gamesValue);
+                        if (gamesOperator === '>=' && games < threshold) return false;
+                        if (gamesOperator === '<=' && games > threshold) return false;
+                        if (gamesOperator === '=' && games !== threshold) return false;
+                    }
+
+                    if (mpgValue !== '') {
+                        const mpg = (player.MP || 0) / (player.G || 1);
+                        const threshold = Number(mpgValue);
+                        if (mpgOperator === '>=' && mpg < threshold) return false;
+                        if (mpgOperator === '<=' && mpg > threshold) return false;
+                        if (mpgOperator === '=' && mpg !== threshold) return false;
+                    }
+
+                    if (selectedTeam !== 'All Teams') {
+                        const playerTeams = parseTeams(player.Tm);
+                        if (!playerTeams.includes(selectedTeam)) return false;
+                    }
+
+                    if (selectedPosition !== 'All Positions') {
+                        const playerPositions = parsePositions(player.Pos);
+                        if (!playerPositions.includes(selectedPosition)) return false;
+                    }
+
+                    if (selectedSeason !== 'All Seasons') {
+                        if (player.Season !== selectedSeason) return false;
+                    }
+                    
+                    if (player[xStat] === null || player[yStat] === null) return false;
+
+                    return true;
+                });
+            }, [allPlayers, selectedTeam, selectedPosition, selectedSeason, gamesOperator, gamesValue, mpgOperator, mpgValue, xStat, yStat]);
+
+            const { xExtent, yExtent } = useMemo(() => {
+                if (filteredPlayers.length === 0) return { xExtent: [0, 30], yExtent: [0, 10] };
+                
+                const xValues = filteredPlayers.map(p => p[xStat]).filter(v => typeof v === 'number' && !isNaN(v));
+                const yValues = filteredPlayers.map(p => p[yStat]).filter(v => typeof v === 'number' && !isNaN(v));
+                
+                if (xValues.length === 0 || yValues.length === 0) {
+                    return { xExtent: [0, 30], yExtent: [0, 10] };
+                }
+                
+                const xMin = Math.min(...xValues);
+                const xMax = Math.max(...xValues);
+                const yMin = Math.min(...yValues);
+                const yMax = Math.max(...yValues);
+                
+                const xPadding = (xMax - xMin) * 0.1 || 1;
+                const yPadding = (yMax - yMin) * 0.1 || 1;
+                
+                return {
+                    xExtent: [xMin - xPadding, xMax + xPadding],
+                    yExtent: [yMin - yPadding, yMax + yPadding]
+                };
+            }, [filteredPlayers, xStat, yStat]);
+
+            const resetFilters = () => {
+                setSelectedTeam('All Teams');
+                setSelectedPosition('All Positions');
+                setSelectedSeason('All Seasons');
+                setXStat('PTS');
+                setYStat('AST');
+                setGamesOperator('>=');
+                setGamesValue('');
+                setMpgOperator('>=');
+                setMpgValue('');
+            };
+
+            if (loading) return <div className="loading">Loading data...</div>;
+            if (error) return <div className="error">{error}</div>;
+
+            const width = 1100;
+            const height = 700;
+            const margin = { top: 40, right: 40, bottom: 60, left: 60 };
+            const innerWidth = width - margin.left - margin.right;
+            const innerHeight = height - margin.top - margin.bottom;
+
+            const xScale = (value) => {
+                return margin.left + ((value - xExtent[0]) / (xExtent[1] - xExtent[0])) * innerWidth;
+            };
+
+            const yScale = (value) => {
+                return margin.top + innerHeight - ((value - yExtent[0]) / (yExtent[1] - yExtent[0])) * innerHeight;
+            };
+
+            const sizeScale = (pts) => {
+                const maxPts = Math.max(...allPlayers.map(p => p.PTS || 0));
+                return 3 + (pts / maxPts) * 17;
+            };
+
+            const xTicks = [];
+            const xStep = (xExtent[1] - xExtent[0]) / 8;
+            for (let i = 0; i <= 8; i++) {
+                xTicks.push(xExtent[0] + xStep * i);
+            }
+
+            const yTicks = [];
+            const yStep = (yExtent[1] - yExtent[0]) / 8;
+            for (let i = 0; i <= 8; i++) {
+                yTicks.push(yExtent[0] + yStep * i);
+            }
+
+            return (
+                <div className="chart-container">
+                    <div className="header-section">
+                        <h1>NBA Stats Explorer</h1>
+                        <p className="subtitle">Interactive player statistics (bubble size = total PTS)</p>
+                    </div>
+                    
+                    <div className="filters-row">
+                        <div className="filter-group">
+                            <label>X-Axis</label>
+                            <select value={xStat} onChange={(e) => setXStat(e.target.value)}>
+                                {statOptions.map(group => (
+                                    <optgroup key={group.category} label={group.category}>
+                                        {group.stats.map(stat => (
+                                            <option key={stat} value={stat}>{stat}</option>
+                                        ))}
+                                    </optgroup>
+                                ))}
+                            </select>
+                        </div>
+                        <div className="filter-group">
+                            <label>Y-Axis</label>
+                            <select value={yStat} onChange={(e) => setYStat(e.target.value)}>
+                                {statOptions.map(group => (
+                                    <optgroup key={group.category} label={group.category}>
+                                        {group.stats.map(stat => (
+                                            <option key={stat} value={stat}>{stat}</option>
+                                        ))}
+                                    </optgroup>
+                                ))}
+                            </select>
+                        </div>
+                        <div className="filter-group">
+                            <label>Team</label>
+                            <select value={selectedTeam} onChange={(e) => setSelectedTeam(e.target.value)}>
+                                {teams.map(team => (
+                                    <option key={team} value={team}>{team}</option>
+                                ))}
+                            </select>
+                        </div>
+                        <div className="filter-group">
+                            <label>Position</label>
+                            <select value={selectedPosition} onChange={(e) => setSelectedPosition(e.target.value)}>
+                                {positions.map(pos => (
+                                    <option key={pos} value={pos}>{pos}</option>
+                                ))}
+                            </select>
+                        </div>
+                        <div className="filter-group">
+                            <label>Games</label>
+                            <div className="comparison-filter">
+                                <select value={gamesOperator} onChange={(e) => setGamesOperator(e.target.value)}>
+                                    <option value=">=">≥</option>
+                                    <option value="<=">≤</option>
+                                    <option value="=">=</option>
+                                </select>
+                                <input 
+                                    type="number" 
+                                    value={gamesValue}
+                                    onChange={(e) => setGamesValue(e.target.value)}
+                                    placeholder="G"
+                                />
+                            </div>
+                        </div>
+                        <div className="filter-group">
+                            <label>MPG</label>
+                            <div className="comparison-filter">
+                                <select value={mpgOperator} onChange={(e) => setMpgOperator(e.target.value)}>
+                                    <option value=">=">≥</option>
+                                    <option value="<=">≤</option>
+                                    <option value="=">=</option>
+                                </select>
+                                <input 
+                                    type="number" 
+                                    value={mpgValue}
+                                    onChange={(e) => setMpgValue(e.target.value)}
+                                    placeholder="MPG"
+                                />
+                            </div>
+                        </div>
+                        <button onClick={resetFilters}>Reset</button>
+                    </div>
+
+                    <div className="filters-row">
+                        <div className="filter-group">
+                            <label>Season</label>
+                            <select value={selectedSeason} onChange={(e) => setSelectedSeason(e.target.value)}>
+                                {seasons.map(season => (
+                                    <option key={season} value={season}>{season}</option>
+                                ))}
+                            </select>
+                        </div>
+                    </div>
+
+                    <div className="chart-wrapper">
+                        <svg 
+                            width={width} 
+                            height={height}
+                            onMouseMove={(e) => setMousePos({ x: e.clientX, y: e.clientY })}
+                        >
+                            {xTicks.map(tick => (
+                                <line
+                                    key={`x-grid-${tick}`}
+                                    x1={xScale(tick)}
+                                    y1={margin.top}
+                                    x2={xScale(tick)}
+                                    y2={height - margin.bottom}
+                                    stroke="#e5e7eb"
+                                    strokeWidth="1"
+                                />
+                            ))}
+                            {yTicks.map(tick => (
+                                <line
+                                    key={`y-grid-${tick}`}
+                                    x1={margin.left}
+                                    y1={yScale(tick)}
+                                    x2={width - margin.right}
+                                    y2={yScale(tick)}
+                                    stroke="#e5e7eb"
+                                    strokeWidth="1"
+                                />
+                            ))}
+
+                            <line
+                                x1={margin.left}
+                                y1={height - margin.bottom}
+                                x2={width - margin.right}
+                                y2={height - margin.bottom}
+                                stroke="#374151"
+                                strokeWidth="2"
+                            />
+                            <line
+                                x1={margin.left}
+                                y1={margin.top}
+                                x2={margin.left}
+                                y2={height - margin.bottom}
+                                stroke="#374151"
+                                strokeWidth="2"
+                            />
+
+                            {xTicks.map(tick => (
+                                <g key={`x-tick-${tick}`}>
+                                    <line
+                                        x1={xScale(tick)}
+                                        y1={height - margin.bottom}
+                                        x2={xScale(tick)}
+                                        y2={height - margin.bottom + 6}
+                                        stroke="#374151"
+                                        strokeWidth="2"
+                                    />
+                                    <text
+                                        x={xScale(tick)}
+                                        y={height - margin.bottom + 20}
+                                        textAnchor="middle"
+                                        fontSize="12"
+                                        fill="#6b7280"
+                                    >
+                                        {formatStatValue(xStat, tick, true)}
+                                    </text>
+                                </g>
+                            ))}
+
+                            {yTicks.map(tick => (
+                                <g key={`y-tick-${tick}`}>
+                                    <line
+                                        x1={margin.left - 6}
+                                        y1={yScale(tick)}
+                                        x2={margin.left}
+                                        y2={yScale(tick)}
+                                        stroke="#374151"
+                                        strokeWidth="2"
+                                    />
+                                    <text
+                                        x={margin.left - 10}
+                                        y={yScale(tick)}
+                                        textAnchor="end"
+                                        dominantBaseline="middle"
+                                        fontSize="12"
+                                        fill="#6b7280"
+                                    >
+                                        {formatStatValue(yStat, tick, true)}
+                                    </text>
+                                </g>
+                            ))}
+
+                            <text
+                                x={width / 2}
+                                y={height - 10}
+                                textAnchor="middle"
+                                fontSize="14"
+                                fontWeight="600"
+                                fill="#374151"
+                            >
+                                {xStat}
+                            </text>
+                            <text
+                                x={-height / 2}
+                                y={15}
+                                textAnchor="middle"
+                                fontSize="14"
+                                fontWeight="600"
+                                fill="#374151"
+                                transform={`rotate(-90)`}
+                            >
+                                {yStat}
+                            </text>
+
+                            {filteredPlayers.map((player, i) => {
+                                const x = xScale(player[xStat] || 0);
+                                const y = yScale(player[yStat] || 0);
+                                const r = sizeScale(player.PTS || 0);
+                                
+                                return (
+                                    <circle
+                                        key={i}
+                                        cx={x}
+                                        cy={y}
+                                        r={r}
+                                        fill="#3b82f6"
+                                        fillOpacity="0.6"
+                                        stroke="#2563eb"
+                                        strokeWidth="1"
+                                        onMouseEnter={() => setHoveredPlayer(player)}
+                                        onMouseLeave={() => setHoveredPlayer(null)}
+                                        style={{ cursor: 'pointer' }}
+                                    />
+                                );
+                            })}
+                        </svg>
+
+                        {hoveredPlayer && (
+                            <div 
+                                className="tooltip"
+                                style={{ 
+                                    left: mousePos.x + 15,
+                                    top: mousePos.y - 15
+                                }}
+                            >
+                                <div className="tooltip-player">{hoveredPlayer.Player}</div>
+                                <div>Team: {hoveredPlayer.Tm}</div>
+                                <div>Position: {hoveredPlayer.Pos}</div>
+                                <div>Season: {hoveredPlayer.Season}</div>
+                                <div>PTS: {formatStatValue('PTS', hoveredPlayer.PTS || 0)}</div>
+                                <div>{xStat}: {formatStatValue(xStat, hoveredPlayer[xStat] || 0)}</div>
+                                <div>{yStat}: {formatStatValue(yStat, hoveredPlayer[yStat] || 0)}</div>
+                                <div>G: {formatStatValue('G', hoveredPlayer.G || 0)}</div>
+                                <div>MPG: {formatStatValue('MP', (hoveredPlayer.MP || 0) / (hoveredPlayer.G || 1))}</div>
+                            </div>
+                        )}
+                        
+                        <div className="source">
+                            Source: Basketball Reference
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<StatsChart />, document.getElementById('root'));
+    </script>
+</body>
+</html>
